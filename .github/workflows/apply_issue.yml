@@ -1,4 +1,4 @@
-name: Cherry-pick issue direct to target
+name: Add issue on branch
 
 on:
   workflow_dispatch:
