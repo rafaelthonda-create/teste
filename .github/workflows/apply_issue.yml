@@ -81,12 +81,32 @@ jobs:
             exit 1
           fi
 
+          FILTERED=""
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+
+            if git log "$TARGET_REF" \
+              --grep="cherry picked from commit $sha" \
+              --fixed-strings \
+              --format=%H -n 1 | grep -q .; then
+              echo "Skipping already cherry-picked: $sha"
+              continue
+            fi
+
+            FILTERED="${FILTERED}${sha}"$'\n'
+          done <<< "$SHAS"
+
+          if [ -z "$FILTERED" ]; then
+            echo "No new commits to cherry-pick for issue '$ISSUE_KEY'"
+            exit 1
+          fi
+
           echo "shas<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$SHAS" >> "$GITHUB_OUTPUT"
+          echo "$FILTERED" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
           echo "Commits to cherry-pick:"
-          echo "$SHAS"
+          echo "$FILTERED"
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
