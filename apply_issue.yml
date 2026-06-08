@@ -1,0 +1,121 @@
+name: Cherry-pick issue direct to target
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_key:
+        description: "Issue key (ex: SPARTA-1234)"
+        required: true
+        type: string
+      source_branch:
+        description: "Source branch (ex: main)"
+        required: true
+        type: string
+      target_branch:
+        description: "Target branch (ex: release/1.2.3)"
+        required: true
+        type: string
+      dry_run:
+        description: "If true, only list commits without cherry-pick or push"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  cherry-pick-direct:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.source_branch }}" = "${{ inputs.target_branch }}" ]; then
+            echo "source_branch and target_branch cannot be the same"
+            exit 1
+          fi
+
+      - name: Fetch remote branches
+        run: |
+          git fetch origin "${{ inputs.source_branch }}" "${{ inputs.target_branch }}"
+
+      - name: Checkout target branch
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git checkout "${{ inputs.target_branch }}"
+          git pull origin "${{ inputs.target_branch }}"
+
+      - name: Find commits by issue key
+        id: discover
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ISSUE_KEY="${{ inputs.issue_key }}"
+          SOURCE_REF="origin/${{ inputs.source_branch }}"
+          TARGET_REF="origin/${{ inputs.target_branch }}"
+
+          SHAS=$(git log "$SOURCE_REF" \
+            --grep="$ISSUE_KEY" \
+            --regexp-ignore-case \
+            --format=%H \
+            --reverse \
+            --not "$TARGET_REF")
+
+          if [ -z "$SHAS" ]; then
+            echo "No commits found for issue '$ISSUE_KEY' in $SOURCE_REF that are not already in $TARGET_REF"
+            exit 1
+          fi
+
+          echo "shas<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$SHAS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "Commits to cherry-pick:"
+          echo "$SHAS"
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "Dry run enabled. No cherry-pick or push will be executed."
+          echo "Issue: ${{ inputs.issue_key }}"
+          echo "Source branch: ${{ inputs.source_branch }}"
+          echo "Target branch: ${{ inputs.target_branch }}"
+          echo "Commits found:"
+          echo "${{ steps.discover.outputs.shas }}"
+
+      - name: Cherry-pick commits
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            echo "Applying $sha"
+
+            if ! git cherry-pick -x "$sha"; then
+              echo "Conflict while cherry-picking $sha"
+              git cherry-pick --abort || true
+              exit 1
+            fi
+          done <<< "${{ steps.discover.outputs.shas }}"
+
+      - name: Push directly to target branch
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git push origin HEAD:"${{ inputs.target_branch }}"
