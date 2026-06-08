@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       issue_key:
-        description: "Issue key (ex: SPARTA-1234)"
+        description: "Issue key(s), comma-separated (ex: SPARTA-1234,SPARTA-5678)"
         required: true
         type: string
       source_branch:
@@ -65,19 +65,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          ISSUE_KEY="${{ inputs.issue_key }}"
+          ISSUE_KEYS_RAW="${{ inputs.issue_key }}"
           SOURCE_REF="origin/${{ inputs.source_branch }}"
           TARGET_REF="origin/${{ inputs.target_branch }}"
 
+          IFS=',' read -r -a ISSUE_KEYS <<< "$ISSUE_KEYS_RAW"
+
+          GREP_ARGS=()
+          for issue in "${ISSUE_KEYS[@]}"; do
+            issue_trimmed="$(echo "$issue" | xargs)"
+            [ -z "$issue_trimmed" ] && continue
+            GREP_ARGS+=("--grep=$issue_trimmed")
+          done
+
+          if [ "${#GREP_ARGS[@]}" -eq 0 ]; then
+            echo "No valid issue key provided in 'issue_key' input"
+            exit 1
+          fi
+
           SHAS=$(git log "$SOURCE_REF" \
-            --grep="$ISSUE_KEY" \
+            "${GREP_ARGS[@]}" \
             --regexp-ignore-case \
             --format=%H \
             --reverse \
-            --not "$TARGET_REF")
+            --not "$TARGET_REF" | awk '!seen[$0]++')
 
           if [ -z "$SHAS" ]; then
-            echo "No commits found for issue '$ISSUE_KEY' in $SOURCE_REF that are not already in $TARGET_REF"
+            echo "No commits found for issue key(s) '$ISSUE_KEYS_RAW' in $SOURCE_REF that are not already in $TARGET_REF"
             exit 1
           fi
 
@@ -97,9 +111,13 @@ jobs:
           done <<< "$SHAS"
 
           if [ -z "$FILTERED" ]; then
-            echo "No new commits to cherry-pick for issue '$ISSUE_KEY'"
+            echo "No new commits to cherry-pick for issue key(s) '$ISSUE_KEYS_RAW'"
+            echo "has_commits=false" >> "$GITHUB_OUTPUT"
+            echo "shas=" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+
+          echo "has_commits=true" >> "$GITHUB_OUTPUT"
 
           echo "shas<<EOF" >> "$GITHUB_OUTPUT"
           echo "$FILTERED" >> "$GITHUB_OUTPUT"
@@ -112,14 +130,14 @@ jobs:
         if: ${{ inputs.dry_run }}
         run: |
           echo "Dry run enabled. No cherry-pick or push will be executed."
-          echo "Issue: ${{ inputs.issue_key }}"
+          echo "Issue key(s): ${{ inputs.issue_key }}"
           echo "Source branch: ${{ inputs.source_branch }}"
           echo "Target branch: ${{ inputs.target_branch }}"
           echo "Commits found:"
           echo "${{ steps.discover.outputs.shas }}"
 
       - name: Cherry-pick commits
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.discover.outputs.has_commits == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -136,6 +154,6 @@ jobs:
           done <<< "${{ steps.discover.outputs.shas }}"
 
       - name: Push directly to target branch
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.discover.outputs.has_commits == 'true' }}
         run: |
           git push origin HEAD:"${{ inputs.target_branch }}"
